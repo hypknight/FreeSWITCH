@@ -316,7 +316,7 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
-	char *values = NULL, *tmp = NULL, *pq_var = NULL;
+	char *values = NULL, *tmp = NULL, *sql_var = NULL;
 	const char *var = NULL;
 	cdr_field_t *cdr_field = NULL;
 	switch_size_t len, offset;
@@ -358,40 +358,61 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 	switch_zmalloc(values, 1);
 	offset = 0;
 
-	for (cdr_field = globals.db_schema->fields; cdr_field->var_name; cdr_field++) {
-		if ((var = switch_channel_get_variable(channel, cdr_field->var_name))) {
-			/* Allocate sufficient buffer for PQescapeString */
-			len = strlen(var);
-			tmp = switch_core_session_alloc(session, len * 2 + 1);
-			/*PQescapeString(tmp, var, len);*/
-			var = tmp;
-		}
-
-		if (cdr_field->quote) {
-			if ((cdr_field->not_null == SWITCH_FALSE) && zstr(var)) {
-				pq_var = switch_mprintf("null,", var);
-			} else {
-				pq_var = switch_mprintf("'%s',", var);
-			}
-		} else {
-			pq_var = switch_mprintf("%s,", var);
-		}
-
-		/* Resize values buffer to accomodate next var */
-		len = strlen(pq_var);
-		tmp = realloc(values, offset + len);
-		values = tmp;
-		memcpy(values + offset, pq_var, len);
-		switch_safe_free(pq_var);
-		offset += len;
+	// If we're not currently connected
+	if (!globals.db_online || mysql_ping(globals.db_connection)) {
+		
+		// Prep the connection
+		globals.db_connection = mysql_init(NULL);
+		
+		// Connect to the database
+		mysql_real_connect(globals.db_connection, globals.db_host, globals.db_user, globals.db_pass, globals.db_name, 0, NULL, 0);
 	}
-	*(values + --offset) = '\0';
 
-	/* INSERT the cdr into the database */
-	insert_cdr(values);
-	switch_safe_free(values);
+	// Make sure we're connected (we need to be for string escaping)
+	if (!mysql_ping(globals.db_connection)) {
+		globals.db_online = 1;
+	
+		for (cdr_field = globals.db_schema->fields; cdr_field->var_name; cdr_field++) {
+			if ((var = switch_channel_get_variable(channel, cdr_field->var_name))) {
+				
+				// Allocate a buffer long enough for mysql_real_escape_string
+				len = strlen(var);
+				tmp = switch_core_session_alloc(session, len * 2 + 1);
+				
+				// Escape the string
+				mysql_real_escape_string(globals.db_connection, tmp, var, strlen(var));
+				var = tmp;
+			}
 
-	return status;
+			if (cdr_field->quote) {
+				if ((cdr_field->not_null == SWITCH_FALSE) && zstr(var)) {
+					sql_var = switch_mprintf("null,", var);
+				} else {
+					sql_var = switch_mprintf("'%s',", var);
+				}
+			} else {
+				sql_var = switch_mprintf("%s,", var);
+			}
+
+			/* Resize values buffer to accomodate next var */
+			len = strlen(sql_var);
+			tmp = realloc(values, offset + len);
+			values = tmp;
+			memcpy(values + offset, sql_var, len);
+			switch_safe_free(sql_var);
+			offset += len;
+		}
+		
+		*(values + --offset) = '\0';
+
+		/* INSERT the cdr into the database */
+		insert_cdr(values);
+		switch_safe_free(values);
+		
+		return status;
+	} else {
+		return SWITCH_STATUS_FALSE;
+	}	
 }
 
 
@@ -532,14 +553,17 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_cdr_mysql_load)
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
 	load_config(pool);
-
 	
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Host: %s \n", globals.db_host);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database User: %s \n", globals.db_user);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Pass: %s \n", globals.db_pass);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Name: %s \n", globals.db_name);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Table: %s \n", globals.db_table);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Spool Directory: %s \n", globals.spool_dir);
+	// If we're debugging, print the config params to the log
+	if(globals.debug)
+	{
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Host: %s \n", globals.db_host);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database User: %s \n", globals.db_user);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Pass: %s \n", globals.db_pass);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Name: %s \n", globals.db_name);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Database Table: %s \n", globals.db_table);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Config Params: Spool Directory: %s \n", globals.spool_dir);
+	}
 	
 	if ((status = switch_dir_make_recursive(globals.spool_dir, SWITCH_DEFAULT_DIR_PERMS, pool)) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error creating %s\n", globals.spool_dir);
