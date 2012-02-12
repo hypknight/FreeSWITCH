@@ -252,7 +252,7 @@ static switch_status_t insert_cdr(const char *values)
 
 	sql = switch_mprintf("INSERT INTO %s (%s) VALUES (%s);", globals.db_table, globals.db_schema->columns, values);
 	assert(sql);
-
+	
 	if (globals.debug) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Query: \"%s\"\n", sql);
 	}
@@ -260,7 +260,7 @@ static switch_status_t insert_cdr(const char *values)
 	switch_mutex_lock(globals.db_mutex);
 
 	// If we're not currently connected
-	if (!globals.db_online || mysql_ping(globals.db_connection)) {
+	if (!globals.db_online || mysql_ping(globals.db_connection) != 0) {
 		
 		// Prep the connection
 		globals.db_connection = mysql_init(NULL);
@@ -270,7 +270,7 @@ static switch_status_t insert_cdr(const char *values)
 	}
 
 	// Make sure we're connected
-	if (!mysql_ping(globals.db_connection)) {
+	if (mysql_ping(globals.db_connection) == 0) {
 		globals.db_online = 1;
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Connection to database failed: %s", mysql_error(globals.db_connection));
@@ -280,7 +280,7 @@ static switch_status_t insert_cdr(const char *values)
 	// Execute the query
 	mysql_query(globals.db_connection, sql);
 	
-	if (!mysql_affected_rows(globals.db_connection)) {
+	if (mysql_affected_rows(globals.db_connection) <= 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "INSERT command failed: %s", mysql_error(globals.db_connection));
 		goto error;
 	}
@@ -290,7 +290,7 @@ static switch_status_t insert_cdr(const char *values)
 	return SWITCH_STATUS_SUCCESS;
 
 error:
-
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Could not INSERT to mySQL -- Spooling to disk");
 	mysql_close(globals.db_connection);
 	globals.db_online = 0;
 	switch_mutex_unlock(globals.db_mutex);
@@ -360,16 +360,26 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 
 	// If we're not currently connected
 	if (!globals.db_online || mysql_ping(globals.db_connection)) {
-		
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "mySQL Init: %s\n", globals.db_host);
+		}
 		// Prep the connection
 		globals.db_connection = mysql_init(NULL);
-		
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "mySQL Real Connect: %s\n", globals.db_host);
+		}
 		// Connect to the database
 		mysql_real_connect(globals.db_connection, globals.db_host, globals.db_user, globals.db_pass, globals.db_name, 0, NULL, 0);
 	}
-
+    
+	if (globals.debug) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Checking mySQL Connection: %s\n", globals.db_host);
+	}
 	// Make sure we're connected (we need to be for string escaping)
-	if (!mysql_ping(globals.db_connection)) {
+	if (mysql_ping(globals.db_connection) == 0) {
+		if (globals.debug) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connection to %s successful!\n", globals.db_host);
+		}
 		globals.db_online = 1;
 	
 		for (cdr_field = globals.db_schema->fields; cdr_field->var_name; cdr_field++) {
@@ -385,6 +395,7 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 			}
 
 			if (cdr_field->quote) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Quoting the strings --\n");
 				if ((cdr_field->not_null == SWITCH_FALSE) && zstr(var)) {
 					sql_var = switch_mprintf("null,", var);
 				} else {
@@ -411,6 +422,7 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 		
 		return status;
 	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Connection to %s failed! Error: %s\n", globals.db_host, mysql_error(globals.db_connection));
 		return SWITCH_STATUS_FALSE;
 	}	
 }
