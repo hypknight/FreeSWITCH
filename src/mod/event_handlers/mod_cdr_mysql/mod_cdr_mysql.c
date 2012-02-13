@@ -395,7 +395,9 @@ static switch_status_t my_on_reporting(switch_core_session_t *session)
 			}
 
 			if (cdr_field->quote) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Quoting the strings --\n");
+				if (globals.debug) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Quoting the string: %s\n",var);
+				}
 				if ((cdr_field->not_null == SWITCH_FALSE) && zstr(var)) {
 					sql_var = switch_mprintf("null,", var);
 				} else {
